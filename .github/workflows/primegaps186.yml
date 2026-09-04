@@ -1,0 +1,255 @@
+name: PrimeGaps186 independent numerical verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      workers:
+        description: "Source worker processes used by the official certificate"
+        required: true
+        default: "4"
+        type: choice
+        options:
+          - "4"
+          - "1"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Recompute and independently check PrimeGaps186
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+
+    env:
+      FLINT_SHA: 7ad753d51c82fdec115cb179b41d0e581f1cb0ec
+      PYFLINT_SHA: 572c8a213a88c0f92feb1bdb938ce4622f4517fa
+      PG186_SHA: 61340d0b74163003b32756bb16e91d9209a5e330
+      MAKE_JOBS: "4"
+      PYTHONUNBUFFERED: "1"
+      PYTHONHASHSEED: "0"
+      LD_LIBRARY_PATH: /usr/local/lib
+      PKG_CONFIG_PATH: /usr/local/lib/pkgconfig
+
+    steps:
+      - name: Checkout verification wrapper
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.12.13
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12.13"
+
+      - name: Prepare directories and provenance record
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/results" "$RUNNER_TEMP/pg186-src"
+          cat > "$GITHUB_WORKSPACE/results/source-commits.txt" <<EOF
+          FLINT=${FLINT_SHA}
+          PYTHON_FLINT=${PYFLINT_SHA}
+          PRIMEGAPS186=${PG186_SHA}
+          WORKERS=${{ inputs.workers }}
+          GITHUB_RUN_ID=${GITHUB_RUN_ID}
+          GITHUB_RUN_ATTEMPT=${GITHUB_RUN_ATTEMPT}
+          GITHUB_SHA=${GITHUB_SHA}
+          RUNNER_OS=${RUNNER_OS}
+          RUNNER_ARCH=${RUNNER_ARCH}
+          EOF
+
+      - name: Install native build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake build-essential ca-certificates curl libtool-bin m4 \
+            libgmp-dev libmpfr-dev pkg-config
+
+      - name: Download and build corrected FLINT
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$RUNNER_TEMP/pg186-src"
+          RESULTS="$GITHUB_WORKSPACE/results"
+          cd "$SRC"
+
+          curl -fL \
+            --retry 10 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
+            "https://codeload.github.com/flintlib/flint/tar.gz/${FLINT_SHA}" \
+            -o flint-source.tar.gz
+          sha256sum flint-source.tar.gz | tee "$RESULTS/flint-source.sha256"
+
+          rm -rf flint
+          mkdir flint
+          tar -xzf flint-source.tar.gz -C flint --strip-components=1
+          cd flint
+
+          {
+            ./bootstrap.sh
+            ./configure --prefix=/usr/local
+            make -j"${MAKE_JOBS}"
+            sudo make install
+            sudo ldconfig
+          } 2>&1 | tee "$RESULTS/flint-build.log"
+
+          pkg-config --modversion flint | tee "$RESULTS/flint-version.txt"
+
+      - name: Install pinned Python dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python --version | tee "$GITHUB_WORKSPACE/results/python-version.txt"
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install "Cython>=3.1,<3.3" meson-python ninja "numpy==2.2.6"
+
+      - name: Download and build python-flint against corrected FLINT
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$RUNNER_TEMP/pg186-src"
+          RESULTS="$GITHUB_WORKSPACE/results"
+          cd "$SRC"
+
+          curl -fL \
+            --retry 10 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
+            "https://codeload.github.com/flintlib/python-flint/tar.gz/${PYFLINT_SHA}" \
+            -o python-flint-source.tar.gz
+          sha256sum python-flint-source.tar.gz | tee "$RESULTS/python-flint-source.sha256"
+
+          rm -rf python-flint
+          mkdir python-flint
+          tar -xzf python-flint-source.tar.gz -C python-flint --strip-components=1
+          cd python-flint
+
+          {
+            CFLAGS="-I/usr/local/include" \
+            LDFLAGS="-L/usr/local/lib -Wl,-rpath,/usr/local/lib" \
+            python -m pip install --no-build-isolation .
+          } 2>&1 | tee "$RESULTS/python-flint-build.log"
+
+          python - <<'PY' | tee "$RESULTS/python-environment.txt"
+          import sys
+          import numpy
+          import flint
+          print("Python:", sys.version.replace("\n", " "))
+          print("NumPy:", numpy.__version__)
+          print("python-flint:", getattr(flint, "__version__", "unknown"))
+          print("FLINT exposed by python-flint:", getattr(flint, "__flint_version__", "unknown"))
+          print("flint package:", flint.__file__)
+          PY
+          python -m pip freeze | sort > "$RESULTS/pip-freeze.txt"
+
+      - name: Download audited PrimeGaps186 snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$RUNNER_TEMP/pg186-src"
+          RESULTS="$GITHUB_WORKSPACE/results"
+          cd "$SRC"
+
+          curl -fL \
+            --retry 10 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
+            "https://codeload.github.com/openai/PrimeGaps186/tar.gz/${PG186_SHA}" \
+            -o primegaps186-source.tar.gz
+          sha256sum primegaps186-source.tar.gz | tee "$RESULTS/primegaps186-source.sha256"
+
+          rm -rf PrimeGaps186
+          mkdir PrimeGaps186
+          tar -xzf primegaps186-source.tar.gz -C PrimeGaps186 --strip-components=1
+          sha256sum PrimeGaps186/prime_gap_186_certificate.py \
+            | tee "$RESULTS/prime-gap-certificate-script.sha256"
+
+      - name: Mandatory signed FFT regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/pg186-src/PrimeGaps186"
+          unset PYTHONOPTIMIZE || true
+          python -B - <<'PY' | tee "$GITHUB_WORKSPACE/results/signed-fft-regression.log"
+          import prime_gap_186_certificate as certificate
+          certificate.check_flint_signed_fft()
+          print("PASS_SIGNED_FFT_REGRESSION")
+          PY
+          grep -Fqx "PASS_SIGNED_FFT_REGRESSION" \
+            "$GITHUB_WORKSPACE/results/signed-fft-regression.log"
+
+      - name: Recompute full fresh numerical certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/pg186-src/PrimeGaps186"
+          unset PYTHONOPTIMIZE || true
+          rm -f "$GITHUB_WORKSPACE/results/prime_gap_186_fresh.json"
+
+          python -B prime_gap_186_certificate.py \
+            --workers "${{ inputs.workers }}" \
+            --output "$GITHUB_WORKSPACE/results/prime_gap_186_fresh.json" \
+            2>&1 | tee "$GITHUB_WORKSPACE/results/certificate.log"
+
+          test -s "$GITHUB_WORKSPACE/results/prime_gap_186_fresh.json"
+
+      - name: Independently check the fresh receipt against the fixed Lean table
+        shell: bash
+        run: |
+          set -euo pipefail
+          RESULTS="$GITHUB_WORKSPACE/results"
+          python -B "$GITHUB_WORKSPACE/verify_primegaps186_receipt.py" \
+            "$RESULTS/prime_gap_186_fresh.json" \
+            | tee "$RESULTS/independent-checker.log"
+
+          grep -Fq \
+            "PASS: fresh receipt implies the fixed PrimeGap186 physical-integral axiom" \
+            "$RESULTS/independent-checker.log"
+
+      - name: Seal receipt and print final markers
+        shell: bash
+        run: |
+          set -euo pipefail
+          RESULTS="$GITHUB_WORKSPACE/results"
+          sha256sum "$RESULTS/prime_gap_186_fresh.json" \
+            | tee "$RESULTS/prime_gap_186_fresh.json.sha256"
+
+          python - "$RESULTS/prime_gap_186_fresh.json" <<'PY' \
+            | tee "$RESULTS/producer-summary.txt"
+          import json, sys
+          receipt = json.load(open(sys.argv[1], encoding="utf-8"))
+          print("producer status:", receipt.get("status"))
+          print("producer passed:", receipt.get("passed"))
+          print("component count:", receipt.get("component_count"))
+          print("raw form count:", receipt.get("raw_form_count"))
+          print("source total relative units:", receipt.get("source_total_relative_units"))
+          print("final quotient lower:", receipt.get("final_quotient_lower"))
+          print("final margin lower:", receipt.get("final_margin_lower"))
+          if receipt.get("status") != "PASS_FRESH_NUMERICAL_CERTIFICATE" or receipt.get("passed") is not True:
+              raise SystemExit("producer receipt did not pass")
+          PY
+
+          {
+            echo "PASS_SIGNED_FFT_REGRESSION"
+            echo "PASS: fresh receipt implies the fixed PrimeGap186 physical-integral axiom"
+            cat "$RESULTS/prime_gap_186_fresh.json.sha256"
+            echo "CHALLENGE_COMPLETE"
+          } | tee "$RESULTS/VERIFICATION_SUMMARY.txt"
+
+          {
+            echo "## PrimeGaps186 independent numerical verification"
+            echo
+            echo '```text'
+            cat "$RESULTS/VERIFICATION_SUMMARY.txt"
+            echo '```'
+            echo
+            echo "### Producer"
+            echo '```text'
+            cat "$RESULTS/producer-summary.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload receipt, logs and provenance
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: primegaps186-verification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: results/
+          if-no-files-found: warn
+          retention-days: 90
