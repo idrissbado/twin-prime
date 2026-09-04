@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Rendered README (MathJax)</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.2.0/github-markdown.min.css">
+  <style>body{padding:2rem;background:#fff} .markdown-body{max-width:900px;margin:auto}</style>
+</head>
+<body>
+  <article id="content" class="markdown-body"></article>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script>
+    window.MathJax = {
+      tex: {inlineMath:[['$','$'],['\\(','\\)']], displayMath:[['$$','$$'],['\\[','\\]']]},
+      options: {skipHtmlTags: ['script','noscript','style','textarea','pre']}
+    };
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
+  <script>
+    async function render(){
+      try{
+        const resp = await fetch('/README.md');
+        const md = await resp.text();
+        document.getElementById('content').innerHTML = marked.parse(md);
+        MathJax.typesetPromise();
+      }catch(e){
+        document.getElementById('content').textContent = 'Failed to load README.md: '+e;
+      }
+    }
+    render();
+  </script>
+</body>
+</html>
